@@ -18,35 +18,40 @@ dotenv_path = os.path.join(current_dir, ".env")
 load_dotenv(dotenv_path)
 
 api_key = os.getenv("OPENAI_API_KEY")
+google_api_key = os.getenv("GOOGLE_PLACES_API_KEY")
 
-st.set_page_config(page_title="智慧旅遊推薦系統 MVP 12.0", layout="wide")
+st.set_page_config(page_title="智慧旅遊推薦系統", layout="wide")
 
-st.title("🌍 智慧旅遊推薦系統 24.0 (防偷天換日+精準定位版)")
-st.caption("🔥 本次修正：阻斷 Booking 精選替代房陷阱 | 嚴懲 AI 座標幻覺 | 預算鋼鐵同步")
+st.title("🌍 智慧旅遊推薦系統")
+st.caption("✨ 結合 Google Maps 真實圖資與 AI 深度攻略 (GPT-4o 旅客真實體驗版)")
 
 if not api_key:
     st.error("❌ 請先在 .env 檔案中設定 OPENAI_API_KEY")
+    st.stop()
+if not google_api_key:
+    st.error("❌ 請先在 .env 檔案中設定 GOOGLE_PLACES_API_KEY")
     st.stop()
 
 client = OpenAI(api_key=api_key)
 DAY_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 'darkblue']
 
-# --- 黑名單與白名單 ---
+# --- 黑名單與白名單 (大幅強化封殺訂房網與官方) ---
 ABSOLUTE_BANNED = [
     'instagram.com', 'ig.com', 'facebook.com', 'fb.com', '.gov.tw', 'taiwan.net.tw', 
     'news', 'ltn.com', 'chinatimes', 'tvbs', 'setn', 'ebc', 'ettoday', 'cts.com',
     'udn.com', 'cna.com.tw', 'storm.mg', 'nownews.com', 'upmedia.mg', 'mirrormedia.mg', 'newtalk.tw',
     'twitch.tv', 'behance', 'ultrapex', 'shop', 'buy', 'wikipedia.org',
-    'klook.com', 'kkday.com', 'agoda.com', 'booking.com', 'trip.com', 'hotels.com'
+    'klook.com', 'kkday.com', 'agoda.com', 'booking.com', 'trip.com', 'hotels.com',
+    'expedia', 'trivago', 'eztravel', 'liontravel', 'colatour', 'asiayo', 'momoshop'
 ]
 
 TRUSTED_DOMAINS = [
     'pixnet.net', 'walkerland.com.tw', 'funtime.com.tw', 'vocus.cc', 
     'medium.com', 'travel.yahoo.com.tw', 'marieclaire.com.tw',
-    'gofun.tw', 'popdaily.com.tw', 'look-in.com.tw', 'dcard.tw', 'ptt.cc'
+    'gofun.tw', 'popdaily.com.tw', 'look-in.com.tw', 'dcard.tw', 'ptt.cc', 'mobile01.com'
 ]
 
-SPAM_KEYWORDS = ['官網', '官方', '新聞', '特惠', '購買', '賺錢', '被動收入', '自媒體', '教學', '行銷', 'seo', '課程', '直銷']
+SPAM_KEYWORDS = ['官網', '官方', '新聞', '特惠', '購買', '賺錢', '被動收入', '自媒體', '教學', '行銷', 'seo', '課程', '直銷', '優惠碼']
 JP_CHARS = ['の', 'に', 'は', 'を', 'だ', 'です', 'ます', 'おすすめ', 'まとめ', 'ランキング', 'サイト']
 
 def filter_travel_source(url, title, strict_mode=True):
@@ -80,32 +85,31 @@ def get_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-# ==================== 🛠️ Booking.com 自動空房與預算爬蟲驗證模組 ====================
-def check_hotel_availability(hotel_name, budget, checkin, checkout, adults, rooms_count):
-    encoded_hotel = urllib.parse.quote(hotel_name)
-    url = f"https://www.booking.com/searchresults.zh-tw.html?ss={encoded_hotel}&checkin={checkin}&checkout={checkout}&group_adults={adults}&no_rooms={rooms_count}&nflt=price%3DTWD-0-{budget}-1"
+# ==================== 🛠️ Google Places 飯店檢索模組 ====================
+def search_real_hotels_google(dest, budget):
+    search_keyword = "平價飯店 OR 青年旅館 OR 民宿" if budget <= 3000 else "飯店 OR 酒店"
+    query = f"{dest} {search_keyword}"
+    encoded_query = urllib.parse.quote(query)
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://www.google.com/"
-    }
+    url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={encoded_query}&key={google_api_key}&language=zh-TW"
+    
+    hotels = []
     try:
-        time.sleep(0.6)
-        res = requests.get(url, headers=headers, timeout=6)
-        if res.status_code == 200:
-            html = res.text
-            # 🚨 核心修正：加入「沒有找到住宿」、「沒有找到符合」，徹底擊碎 Booking 的替代推薦陷阱
-            full_keywords = [
-                "房間已滿", "已售罄", "沒有符合", "無空房", "無法預訂", 
-                "沒有找到符合", "全體滿房", "沒空房", "沒有可預訂", "沒有找到住宿"
-            ]
-            if any(kw in html for kw in full_keywords):
-                return False, url 
-            return True, url 
-        return True, url 
-    except:
-        return True, url
+        res = requests.get(url, timeout=5)
+        data = res.json()
+        if data.get('status') == 'OK':
+            for r in data['results'][:6]:
+                hotels.append({
+                    "name": r.get('name'),
+                    "lat": r['geometry']['location']['lat'],
+                    "lng": r['geometry']['location']['lng'],
+                    "rating": r.get('rating', '無評分'),
+                    "address": r.get('formatted_address', '無地址')
+                })
+    except Exception as e:
+        st.error(f"Google Places API 錯誤: {e}")
+    
+    return hotels
 
 # ==================== 狀態記憶初始化 ====================
 if "travel_result" not in st.session_state: st.session_state.travel_result = None
@@ -135,10 +139,10 @@ with st.sidebar:
         col1, col2 = st.columns(2)
         with col1: travelers = st.number_input("旅遊人數", min_value=1, value=2)
         with col2: rooms = st.number_input("房間數", min_value=1, value=1)
-        hotel_budget = st.slider("每晚飯店預算上限 (TWD)", 1000, 15000, 2000, step=500) # 預設改2000測試極限
+        hotel_budget = st.slider("每晚飯店預算參考 (TWD)", 1000, 15000, 2000, step=500)
 
     st.write("---")
-    submit_button = st.button("啟動終極精準規劃 🚀", type="primary")
+    submit_button = st.button("啟動旅遊規劃 🚀", type="primary")
 
     st.write("---")
     st.header("👁️ 視圖控制中心")
@@ -153,13 +157,8 @@ def build_itinerary(dest, d_days, t_date, budget, forced_hotel_obj=None):
     st.session_state.link_pools = {}
     st.session_state.hotel_idx = 0 
     
-    checkin_str = t_date.strftime('%Y-%m-%d')
-    nights = max(1, d_days - 1)
-    checkout_str = (t_date + datetime.timedelta(days=nights)).strftime('%Y-%m-%d')
-
-    # ------------------ 步驟 1：抓取全域攻略 ------------------
-    with st.spinner(f"🔍 正在嚴格篩選【{dest}】當地優質攻略..."):
-        global_query = f"{dest} {d_days}天 自由行 遊記 推薦"
+    with st.spinner(f"🔍 正在篩選【{dest}】當地優質達人遊記..."):
+        global_query = f"{dest} {d_days}天 自由行 遊記 心得 推薦 blog"
         global_dedup = {}
         try:
             with DDGS() as crawler:
@@ -186,29 +185,28 @@ def build_itinerary(dest, d_days, t_date, budget, forced_hotel_obj=None):
         st.error("❌ 無法取得精準的旅遊攻略，請嘗試更換關鍵字。")
         st.stop()
 
-    # ------------------ 步驟 2：篩選飯店（加入嚴格座標與預算警告） ------------------
     verified_hotel_data = None
     
     if forced_hotel_obj:
         verified_hotel_data = forced_hotel_obj
-    else:
-        banned_in_loop = set(st.session_state.seen_hotels)
-        for attempt in range(6):
-            banned_str = ", ".join(list(banned_in_loop)) if banned_in_loop else "無"
-            with st.spinner(f"🤖 AI 正在尋找符合預算且有空房的飯店 (嘗試第 {attempt+1}/6 次)..."):
-                # 🚨 核心修正：加強 Prompt 控制，杜絕高價大飯店與「萬用火車站」座標
+    elif enable_hotel:
+        with st.spinner("🤖 正在從 Google Maps 檢索真實飯店資料..."):
+            real_hotels = search_real_hotels_google(dest, budget)
+            available_hotels = [h for h in real_hotels if h['name'] not in st.session_state.seen_hotels]
+            
+            if available_hotels:
+                hotel_options_str = "\n".join([f"- {h['name']} (評分:{h['rating']}, 座標:{h['lat']},{h['lng']}, 地址:{h['address']})" for h in available_hotels])
+                
                 hotel_prompt = f"""
-                請為「{dest}」推薦 1 間真實存在、每晚預算上限為 {budget} TWD 的平價平民旅宿、青年旅館或商務旅館。
+                以下是透過 Google Maps 取得「{dest}」真實存在的飯店清單：
+                {hotel_options_str}
                 
-                【硬性防錯規範】:
-                1. 預算限制非常嚴格（目前為 {budget} TWD）。絕對禁止推薦原本行情就遠超預算的知名五星級大飯店（例如：福華大飯店、晶華酒店、老爺大酒店、W Hotel等），否則線上爬蟲會直接因為超標判定「沒有找到住宿」而將其淘汰。
-                2. 經緯度 (lat, lng) 必須是該飯店的「精確地理位置」，絕對不可偷懶敷衍全部標在「台北車站」或市中心點(如 25.0478, 121.5170)！必須讓地圖標記正確。
-                3. 【絕對不可推薦以下飯店】: {banned_str}
+                請根據使用者的預算偏好（每晚約 {budget} TWD），從上述清單中挑選「1間」最適合的飯店。
                 
-                請直接以下列 JSON 格式回傳：
+                請嚴格以下列 JSON 格式回傳，座標必須「完全照抄」清單上的數據，不可自己發明：
                 {{
-                    "name": "飯店名稱",
-                    "description": "簡短的心得點評與生活機能介紹。",
+                    "name": "挑選的飯店名稱",
+                    "description": "簡短的推薦理由與周邊生活機能介紹。",
                     "lat": 緯度數字,
                     "lng": 經度數字
                 }}
@@ -216,35 +214,26 @@ def build_itinerary(dest, d_days, t_date, budget, forced_hotel_obj=None):
                 try:
                     h_res = client.chat.completions.create(
                         model="gpt-4o-mini", messages=[{"role": "user", "content": hotel_prompt}],
-                        response_format={"type": "json_object"}, temperature=0.4
+                        response_format={"type": "json_object"}, temperature=0.2
                     )
-                    h_data = json.loads(h_res.choices[0].message.content)
-                    h_name = h_data.get("name", "精選飯店")
-                    
-                    # 🔍 啟動網頁爬蟲即時攔截驗證
-                    with st.spinner(f"🕵️‍♂️ 正在線上驗證【{h_name}】是否被 Booking 判定為無住宿或已滿房..."):
-                        is_avail, _ = check_hotel_availability(h_name, budget, checkin_str, checkout_str, travelers, rooms)
-                    
-                    if is_avail:
-                        verified_hotel_data = h_data
-                        break
-                    else:
-                        st.toast(f"⚠️ 偵測到「{h_name}」不符預算預訂條件或已被 Booking.com 替代，自動淘汰！")
-                        banned_in_loop.add(h_name)
-                except Exception: pass
-        
-        if not verified_hotel_data:
-            st.warning("⚠️ 經多次爬蟲比對，該預算區間極其熱門，已為您採用保底安全旅宿。")
-            verified_hotel_data = h_data 
+                    verified_hotel_data = json.loads(h_res.choices[0].message.content)
+                except Exception: 
+                    verified_hotel_data = available_hotels[0]
+                    verified_hotel_data['description'] = f"這是一間位於 {dest} 的精選住宿，Google 評分 {verified_hotel_data['rating']}。"
+            else:
+                st.warning("⚠️ 附近找不到符合條件的新飯店，將採用預設中心點。")
+                verified_hotel_data = {"name": "市區中心", "description": "預設起點", "lat": 25.0478, "lng": 121.5170}
 
-    # ------------------ 步驟 3：建立放射狀骨架 ------------------
-    with st.spinner(f"🧠 已鎖定真實有房且精準定位之飯店【{verified_hotel_data['name']}】，正在安排周邊不繞路行程..."):
+    hotel_context = ""
+    if enable_hotel and verified_hotel_data:
+        hotel_context = f"【住宿位置】: 已確認入住位於 (緯度:{verified_hotel_data['lat']}, 經度:{verified_hotel_data['lng']}) 的「{verified_hotel_data['name']}」。請務必以此實際座標為核心出發點（放射狀行程），絕對不可繞路！"
+        
+    with st.spinner(f"🧠 正在安排不繞路的順路行程 (動用 GPT-4o 確保動線與分散度)..."):
         global_block = "\n".join([f"【文獻】{g['title']}\n摘要: {g['snippet']}" for g in st.session_state.global_itineraries])
         skeleton_prompt = f"""
-        你是一個專業的旅遊規劃師。請為「{dest}」規劃一個實用、不繞路的行程骨架。
-        【住宿位置】: 已確認入住位於 (緯度:{verified_hotel_data['lat']}, 經度:{verified_hotel_data['lng']}) 的「{verified_hotel_data['name']}」。
-        請務必以此飯店實際座標為核心出發點（放射狀行程），重新安排每天的景點，絕對不可繞路！
-        【天數限制】: 必須包含從 day 1 到 day {d_days} 的完整資料。
+        你是一個專業的旅遊規劃師。請為「{dest}」規劃一個實用的行程骨架。
+        {hotel_context}
+        【天數限制與空間要求】: 必須包含從 day 1 到 day {d_days} 的完整資料。且確保「景點不要太過集中」，每天應有合理的移動範圍與探索感。每天建議安排 3~4 個景點。
         {global_block}
         請嚴格以下列 JSON 格式回傳骨架：
         {{
@@ -255,7 +244,7 @@ def build_itinerary(dest, d_days, t_date, budget, forced_hotel_obj=None):
         """
         try:
             skeleton_res = client.chat.completions.create(
-                model="gpt-4o-mini", messages=[{"role": "user", "content": skeleton_prompt}],
+                model="gpt-4o", messages=[{"role": "user", "content": skeleton_prompt}],
                 response_format={"type": "json_object"}, temperature=0.3, max_tokens=2000
             )
             skeleton_data = json.loads(skeleton_res.choices[0].message.content)
@@ -263,43 +252,37 @@ def build_itinerary(dest, d_days, t_date, budget, forced_hotel_obj=None):
             st.error(f"骨架生成失敗: {e}")
             st.stop()
 
-    # ------------------ 步驟 4：深度抓取景點部落格文章 ------------------
-    spot_deep_data = {}
     with DDGS() as crawler:
-        h_name = verified_hotel_data['name']
-        with st.spinner(f"🏨 正在同步抓取新飯店【{h_name}】的真實達人開箱攻略..."):
-            hotel_links = []
-            try:
-                h_res = list(crawler.text(f"{dest} {h_name} 住宿 心得 遊記", region='tw-tz', max_results=8))
-                for r in h_res:
-                    if filter_travel_source(r.get('href', ''), r.get('title', ''), strict_mode=False):
-                        hotel_links.append({"url": r.get('href', ''), "title": r.get('title', ''), "snippet": r.get('body', '')[:150]})
-            except: pass
-            st.session_state.link_pools[h_name] = hotel_links
-            spot_deep_data[h_name] = hotel_links[0] if hotel_links else {"url": "無", "snippet": "無"}
+        if enable_hotel and verified_hotel_data:
+            h_name = verified_hotel_data['name']
+            with st.spinner(f"🏨 正在過濾官方網頁，專注抓取飯店【{h_name}】的真實心得/遊記..."):
+                hotel_links = []
+                try:
+                    # 強制加上 blog 心得 遊記，過濾掉官方或訂房網
+                    h_res = list(crawler.text(f"{dest} {h_name} 住宿 心得 遊記 blog", region='tw-tz', max_results=12))
+                    for r in h_res:
+                        if filter_travel_source(r.get('href', ''), r.get('title', ''), strict_mode=False):
+                            hotel_links.append({"url": r.get('href', ''), "title": r.get('title', ''), "snippet": r.get('body', '')[:150]})
+                except: pass
+                st.session_state.link_pools[h_name] = hotel_links
 
         for day_info in skeleton_data.get("skeleton", []):
             for spot in day_info.get("spots", []):
-                with st.spinner(f"📍 正在深度檢索【{spot}】的遊記散策..."):
+                with st.spinner(f"📍 正在過濾官方資訊，深度檢索【{spot}】的鄉民評價與遊記..."):
                     spot_links = []
                     try:
-                        s_res = list(crawler.text(f"{dest} {spot} 遊記 心得 參觀", region='tw-tz', max_results=10))
+                        s_res = list(crawler.text(f"{dest} {spot} 遊記 心得 評價 blog", region='tw-tz', max_results=12))
                         for r in s_res:
                             if filter_travel_source(r.get('href', ''), r.get('title', ''), strict_mode=False):
                                 spot_links.append({"url": r.get('href', ''), "title": r.get('title', ''), "snippet": r.get('body', '')[:150]})
                     except: pass
                     st.session_state.link_pools[spot] = spot_links
-                    spot_deep_data[spot] = spot_links[0] if spot_links else {"url": "無", "snippet": "暫無專欄介紹"}
                     time.sleep(0.2)
 
-    # ------------------ 步驟 5：終極融合產出手冊 ------------------
-    with st.spinner("🧙‍♂️ AI 正在融合深度文獻，產出最終手冊..."):
-        final_prompt = f"""
-        請根據精準搜尋到的「遊記摘要」，撰寫最終行程。
-        【必須完整輸出從 Day 1 到 Day {d_days} 的行程】
-        請嚴格以下列 JSON 格式回傳，並確保景點座標 (lat, lng) 準確無誤：
-        {{
-            "summary": "一句話總結這個充滿人情味的行程",
+    with st.spinner("🧙‍♂️ AI 正在融合真實文獻，完整產出所有行程內容 (確保不偷懶)..."):
+        hotels_json = ""
+        if enable_hotel and verified_hotel_data:
+            hotels_json = f"""
             "hotels": [
                 {{
                     "name": "{verified_hotel_data['name']}",
@@ -308,13 +291,40 @@ def build_itinerary(dest, d_days, t_date, budget, forced_hotel_obj=None):
                     "lng": {verified_hotel_data['lng']}
                 }}
             ],
+            """
+        else:
+            hotels_json = '"hotels": [],'
+            
+        references_text = ""
+        for s_name, links in st.session_state.link_pools.items():
+            if links:
+                references_text += f"[{s_name} 鄉民評價/遊記摘要]: {links[0]['title']} - {links[0]['snippet']}\n"
+
+        final_prompt = f"""
+        請根據以下精準搜尋到的「真實遊記摘要」，撰寫最終行程。
+        
+        遊記摘要參考：
+        {references_text}
+        
+        【要求一：真實網路評價與拒絕官方網址】
+        景點不可提供官方網站連結！請專注於結合遊記產出「web_intro（網路介紹）」，以鄉民、旅客的真實口吻說明這個景點為什麼好玩、有什麼雷區或必吃必看重點。
+
+        【要求二：絕不偷懶，完整生成】
+        你必須「完整產出」 Day 1 到 Day {d_days} 的所有行程內容！
+        絕對不允許使用「以此類推」、「...等」字眼，哪怕文本很長也必須把每一天的每一個行程完整寫完。
+        
+        請嚴格以下列 JSON 格式回傳，並確保景點座標 (lat, lng) 準確無誤：
+        {{
+            "summary": "一句話總結這個充滿人情味的行程",
+            {hotels_json}
             "itinerary": [
                 {{
                     "day": 1,
                     "spots": [
                         {{
                             "name": "景點名稱",
-                            "description": "溫度的參觀心法",
+                            "description": "具有溫度的深度參觀心法與景點介紹（不可省略）",
+                            "web_intro": "真實旅客的網路評價、鄉民心得或特別推薦亮點（不可省略）",
                             "lat": 緯度數字, "lng": 經度數字, "transit_info": "到下一站的交通建議"
                         }}
                     ]
@@ -323,16 +333,18 @@ def build_itinerary(dest, d_days, t_date, budget, forced_hotel_obj=None):
         }}
         """
         try:
+            # 升級為 gpt-4o 並拉高 Token 限制確保完整生成
             final_res = client.chat.completions.create(
-                model="gpt-4o-mini", messages=[{"role": "user", "content": final_prompt}],
-                response_format={"type": "json_object"}, temperature=0.4, max_tokens=4000
+                model="gpt-4o", messages=[{"role": "user", "content": final_prompt}],
+                response_format={"type": "json_object"}, temperature=0.4, max_tokens=8000
             )
             final_data = json.loads(final_res.choices[0].message.content)
             
             st.session_state.travel_result = final_data
-            st.session_state.seen_hotels.add(verified_hotel_data['name'])
-            if st.session_state.original_hotel_loc is None:
-                st.session_state.original_hotel_loc = (verified_hotel_data['lat'], verified_hotel_data['lng'])
+            if enable_hotel and verified_hotel_data:
+                st.session_state.seen_hotels.add(verified_hotel_data['name'])
+                if st.session_state.original_hotel_loc is None:
+                    st.session_state.original_hotel_loc = (verified_hotel_data['lat'], verified_hotel_data['lng'])
             st.rerun()
         except Exception as e:
             st.error(f"最終數據融合失敗：{e}")
@@ -345,22 +357,6 @@ if submit_button:
         st.session_state.replan_warning_hotel = None
         build_itinerary(destination, days, travel_date, hotel_budget)
     else: st.warning("⚠️ 請先輸入目的地！")
-
-if st.session_state.replan_warning_hotel is not None:
-    far_hotel = st.session_state.replan_warning_hotel
-    st.error("🚨 **【全域重新規劃通知】周邊範圍飯店已耗盡！**")
-    st.warning(f"在您原本的核心區域 5 公里內，已經找不到其他符合預算 ({hotel_budget} TWD) 且有空房的飯店。\n\n"
-               f"系統幫您找到了位於遠處的 **【{far_hotel['name']}】** (已通過Booking空房與預算嚴格驗證)。\n"
-               "⚠️ **為避免瘋狂繞路，請以此新飯店為起點重新安排整體行程！**")
-    
-    c1, c2 = st.columns(2)
-    if c1.button("🔄 以此新飯店為核心，【重新規劃全部行程】", type="primary"):
-        st.session_state.replan_warning_hotel = None
-        build_itinerary(destination, days, travel_date, hotel_budget, forced_hotel_obj=far_hotel)
-    if c2.button("❌ 放棄此備案，我調整預算再試一次"):
-        st.session_state.replan_warning_hotel = None
-        st.rerun()
-    st.stop()
 
 # ==================== 畫面渲染區 ====================
 if st.session_state.travel_result is not None:
@@ -386,68 +382,18 @@ if st.session_state.travel_result is not None:
         
         if has_hotel and curr_hotel:
             hotel_name = curr_hotel['name']
-            checkin_str = travel_date.strftime('%Y-%m-%d')
-            nights = max(1, days - 1)
-            checkout_str = (travel_date + datetime.timedelta(days=nights)).strftime('%Y-%m-%d')
             
-            encoded_hotel = urllib.parse.quote(hotel_name)
-            booking_link = f"https://www.booking.com/searchresults.zh-tw.html?ss={encoded_hotel}&checkin={checkin_str}&checkout={checkout_str}&group_adults={travelers}&no_rooms={rooms}&nflt=price%3DTWD-0-{hotel_budget}-1"
-            gmaps_hotel_link = f"https://www.google.com/maps/search/?api=1&query={encoded_hotel}"
+            encoded_hotel_search = urllib.parse.quote(f"{destination} {hotel_name}")
+            google_travel_link = f"https://www.google.com/travel/search?q={encoded_hotel_search}"
+            gmaps_hotel_link = f"https://www.google.com/maps/search/?api=1&query={encoded_hotel_search}"
             
             st.info(f"🏨 **核心住宿推薦：{hotel_name}**\n\n{curr_hotel.get('description', '')}")
             
-            # --- 🔄 按鈕：換一間備用飯店 (同步進行嚴格 Booking 爬蟲驗證) ---
-            if st.button(f"🔄 滿房了？換一間備用飯店 (自動進行網頁空房與預算掃描)"):
-                orig_lat, orig_lng = st.session_state.original_hotel_loc
-                new_hotel_data = None
-                
-                for _ in range(6):
-                    banned_str = ", ".join(list(st.session_state.seen_hotels))
-                    refresh_prompt = f"""
-                    舊飯店座標為 (緯度:{orig_lat}, 經度:{orig_lng})。
-                    請為【{destination}】推薦 1 間符合每晚 {hotel_budget} TWD 預算上限的平價新旅館。
-                    【絕對禁止】推薦超標的昂貴大飯店或已排除的名單：{banned_str}。
-                    請確保經緯度精確，勿胡亂標示在火車站。
-                    請以 JSON 回傳：{{"name": "飯店名", "description": "點評", "lat": 緯度, "lng": 經度}}
-                    """
-                    try:
-                        new_h_res = client.chat.completions.create(
-                            model="gpt-4o-mini", messages=[{"role": "user", "content": refresh_prompt}],
-                            response_format={"type": "json_object"}, temperature=0.5
-                        )
-                        candidate = json.loads(new_h_res.choices[0].message.content)
-                        st.session_state.seen_hotels.add(candidate['name'])
-                        
-                        is_avail, _ = check_hotel_availability(candidate['name'], hotel_budget, checkin_str, checkout_str, travelers, rooms)
-                        if is_avail:
-                            new_hotel_data = candidate
-                            break
-                    except: continue
-                
-                if new_hotel_data:
-                    dist = get_distance(orig_lat, orig_lng, new_hotel_data['lat'], new_hotel_data['lng'])
-                    if dist > 5.0:
-                        st.session_state.replan_warning_hotel = new_hotel_data
-                        st.rerun()
-                    else:
-                        with DDGS() as crawler:
-                            h_links = []
-                            try:
-                                h_res = list(crawler.text(f"{destination} {new_hotel_data['name']} 住宿 心得 遊記", region='tw-tz', max_results=8))
-                                for r in h_res:
-                                    if filter_travel_source(r.get('href', ''), r.get('title', ''), strict_mode=False):
-                                        h_links.append({"url": r.get('href', ''), "title": r.get('title', ''), "snippet": r.get('body', '')[:150]})
-                            except: pass
-                            st.session_state.link_pools[new_hotel_data['name']] = h_links
-                        
-                        st.session_state.travel_result['hotels'].append(new_hotel_data)
-                        st.session_state.hotel_idx = len(st.session_state.travel_result['hotels']) - 1
-                        st.rerun()
-                else:
-                    st.error("❌ 經多重爬蟲掃描，目前附近已無其他符合預算之空房旅宿。")
+            if st.button("🔄 換一間飯店並重新規劃"):
+                build_itinerary(destination, days, travel_date, hotel_budget)
 
             st.markdown("🚀 **【即時工具直達專區】**")
-            st.markdown(f"👉 [點我直達 **Booking.com** 查看此飯店 (已自動帶入 {hotel_budget} TWD 預算過濾)]({booking_link})")
+            st.markdown(f"👉 [點我前往 **Google 旅遊** 查看此飯店比價資訊]({google_travel_link})")
             
             h_pool = st.session_state.link_pools.get(hotel_name, [])
             if h_pool:
@@ -456,13 +402,14 @@ if st.session_state.travel_result is not None:
                 curr_h_link = h_pool[st.session_state[h_idx_key] % len(h_pool)]
                 
                 hc1, hc2 = st.columns([4, 1])
-                with hc1: st.markdown(f"👉 [📖 **查看本飯店最新開箱文**：{curr_h_link['title']}]({curr_h_link['url']})")
+                # 這裡改為顯示「真實旅客心得/遊記」
+                with hc1: st.markdown(f"👉 [📖 **真實旅客住宿心得與遊記**：{curr_h_link['title']}]({curr_h_link['url']})")
                 with hc2:
-                    if len(h_pool) > 1 and st.button("🔄 換一篇", key=f"btn_{h_idx_key}"):
+                    if len(h_pool) > 1 and st.button("🔄 換一篇遊記", key=f"btn_{h_idx_key}"):
                         st.session_state[h_idx_key] += 1
                         st.rerun()
 
-            st.markdown(f"👉 [🌍 在 **Google Maps** 中直接查看此飯店地標評論]({gmaps_hotel_link})")
+            st.markdown(f"👉 [🌍 在 **Google Maps** 中精確定位與查看評價]({gmaps_hotel_link})")
             st.write("---")
         
         for d_idx, day_info in enumerate(result.get('itinerary', [])):
@@ -476,7 +423,9 @@ if st.session_state.travel_result is not None:
                 if spot.get('transit_info'): st.markdown(f"⬇️ 🚌 *{spot['transit_info']}*")
                     
                 with st.expander(f"📍 站點 {s_idx+1}: {spot['name']}"):
-                    st.markdown(spot.get('description', '無簡介'))
+                    st.markdown(f"**📝 景點心法**：\n{spot.get('description', '無簡介')}")
+                    st.markdown(f"**💬 鄉民/旅客評價**：\n{spot.get('web_intro', '目前暫無評價紀錄')}")
+                    st.markdown("---")
                     
                     s_pool = st.session_state.link_pools.get(spot['name'], [])
                     if s_pool:
@@ -485,7 +434,8 @@ if st.session_state.travel_result is not None:
                         curr_s_link = s_pool[st.session_state[s_idx_key] % len(s_pool)]
                         
                         sc1, sc2 = st.columns([4, 1])
-                        with sc1: st.markdown(f"📖 **[遊記：{curr_s_link['title']}]({curr_s_link['url']})**")
+                        # 只留下遊記連結，徹底刪除參考來源 (官方網站)
+                        with sc1: st.markdown(f"📖 **[網誌遊記：{curr_s_link['title']}]({curr_s_link['url']})**")
                         with sc2:
                             if len(s_pool) > 1 and st.button("🔄 換一篇", key=f"btn_{s_idx_key}"):
                                 st.session_state[s_idx_key] += 1
@@ -493,11 +443,11 @@ if st.session_state.travel_result is not None:
                         
                     encoded_gmaps_spot = urllib.parse.quote(spot['name'])
                     gmaps_spot_link = f"https://www.google.com/maps/search/?api=1&query={encoded_gmaps_spot}"
-                    st.markdown(f"🗺️ **[🌍 在 Google Maps 中直接搜尋【{spot['name']}】]({gmaps_spot_link})**")
+                    st.markdown(f"🗺️ **[🌍 在 Google Maps 中開啟此景點]({gmaps_spot_link})**")
             st.write("---")
 
     with col2:
-        st.subheader("🗺️ 旅遊路徑與路網視覺化 (動態重繪)")
+        st.subheader("🗺️ 旅遊路徑與路網視覺化")
         if has_hotel and curr_hotel: base_loc = [curr_hotel['lat'], curr_hotel['lng']]
         else:
             try:
@@ -544,5 +494,5 @@ if st.session_state.travel_result is not None:
                         dash_array='10, 10' if is_to_from_hotel else None 
                     ).add_to(m)
         
-        map_key = f"v24_travel_map_{st.session_state.hotel_idx}"
+        map_key = f"travel_map_{st.session_state.hotel_idx}"
         st_folium(m, width="100%", height=600, returned_objects=[], key=map_key)
